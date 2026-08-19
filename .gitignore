@@ -25,4 +25,5 @@ dist-ssr
 
 .env
 api/.players_cache.json
-__pycache__/
+api/.games_cache.json
+api/__pycache__/*

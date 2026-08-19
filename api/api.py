@@ -16,8 +16,11 @@ API_BASE = "https://api.sportradar.com/wnba/trial/v8/en"
 API_KEY = os.environ.get("SPORTS_API_KEY", "")
 
 INDEX_CACHE_FILE = Path(__file__).parent / ".players_cache.json"
+GAMES_CACHE_FILE = Path(__file__).parent / ".games_cache.json"
 INDEX_TTL_SECONDS = 24 * 60 * 60
 STATS_TTL_SECONDS = 10 * 60
+PROFILE_TTL_SECONDS = 60 * 60
+SCHEDULE_TTL_SECONDS = 60 * 60
 MIN_REQUEST_INTERVAL = 1.15  # trial keys are limited to ~1 request/second
 
 PLAYER_ID_RE = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
@@ -180,3 +183,155 @@ def player_stats(player_id):
 
     _stats_cache[player_id] = (time.time(), result)
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Per-player game log (last N games)
+# ---------------------------------------------------------------------------
+
+_profile_cache = {}
+_schedule_cache = {}
+_games_lock = threading.Lock()
+try:
+    _games_cache = json.loads(GAMES_CACHE_FILE.read_text())
+except (OSError, ValueError):
+    _games_cache = {}
+
+
+def _get_profile(player_id):
+    cached = _profile_cache.get(player_id)
+    if cached and time.time() - cached[0] < PROFILE_TTL_SECONDS:
+        return cached[1]
+    profile = _fetch(f"/players/{player_id}/profile.json")
+    _profile_cache[player_id] = (time.time(), profile)
+    return profile
+
+
+def _get_schedule(year):
+    cached = _schedule_cache.get(year)
+    if cached and time.time() - cached[0] < SCHEDULE_TTL_SECONDS:
+        return cached[1]
+    schedule = _fetch(f"/games/{year}/REG/schedule.json")
+    games = schedule.get("games", [])
+    _schedule_cache[year] = (time.time(), games)
+    return games
+
+
+def _parse_minutes(value):
+    """'34:12' -> 34.2; passes numbers through."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        parts = str(value).split(":")
+        return round(int(parts[0]) + int(parts[1]) / 60, 1)
+    except (ValueError, IndexError):
+        return None
+
+
+def _extract_game(summary):
+    """Reduce a game summary to the fields the gamelog needs; closed games
+    never change, so this is cached to disk indefinitely."""
+    out = {
+        "id": summary["id"],
+        "scheduled": summary.get("scheduled"),
+        "players": {},
+    }
+    for side in ("home", "away"):
+        team = summary.get(side, {})
+        out[side] = {
+            "id": team.get("id"),
+            "alias": team.get("alias"),
+            "points": team.get("points"),
+        }
+        for player in team.get("players", []):
+            stats = player.get("statistics")
+            if not stats:
+                continue
+            out["players"][player["id"]] = {
+                "played": bool(player.get("played")),
+                "points": stats.get("points"),
+                "rebounds": stats.get("rebounds"),
+                "minutes": _parse_minutes(stats.get("minutes")),
+            }
+    return out
+
+
+def _get_game(game_id):
+    with _games_lock:
+        cached = _games_cache.get(game_id)
+    if cached:
+        return cached
+    extracted = _extract_game(_fetch(f"/games/{game_id}/summary.json"))
+    with _games_lock:
+        _games_cache[game_id] = extracted
+        GAMES_CACHE_FILE.write_text(json.dumps(_games_cache))
+    return extracted
+
+
+@app.route("/api/players/<player_id>/gamelog")
+def player_gamelog(player_id):
+    if not PLAYER_ID_RE.fullmatch(player_id):
+        return jsonify({"error": "Invalid player id"}), 400
+    try:
+        profile = _get_profile(player_id)
+        team = profile.get("team") or {}
+        team_id = team.get("id")
+        if not team_id:
+            return jsonify({"error": "Player has no current team"}), 404
+        season = _latest_season(profile.get("seasons", []))
+        if not season:
+            return jsonify({"error": "No season data for player"}), 404
+
+        schedule = _get_schedule(season["year"])
+        team_games = sorted(
+            (
+                g
+                for g in schedule
+                if g.get("status") == "closed"
+                and team_id in (g["home"]["id"], g["away"]["id"])
+            ),
+            key=lambda g: g.get("scheduled", ""),
+            reverse=True,
+        )
+
+        games = []
+        # Scan a few extra games past 10 to skip ones the player sat out.
+        for scheduled_game in team_games[:15]:
+            if len(games) >= 10:
+                break
+            game = _get_game(scheduled_game["id"])
+            line = game["players"].get(player_id)
+            if not line or not line["played"] or not line["minutes"]:
+                continue
+            is_home = game["home"]["id"] == team_id
+            own, opp = (
+                (game["home"], game["away"]) if is_home else (game["away"], game["home"])
+            )
+            games.append(
+                {
+                    "game_id": game["id"],
+                    "date": game["scheduled"],
+                    "home": is_home,
+                    "opponent": opp["alias"],
+                    "team_points": own["points"],
+                    "opponent_points": opp["points"],
+                    "points": line["points"],
+                    "rebounds": line["rebounds"],
+                    "minutes": line["minutes"],
+                }
+            )
+        games.reverse()  # chronological, oldest first
+
+        return jsonify(
+            {
+                "id": player_id,
+                "full_name": profile.get("full_name", ""),
+                "team": f"{team.get('market', '')} {team.get('name', '')}".strip(),
+                "season": {"year": season.get("year"), "type": season.get("type")},
+                "games": games,
+            }
+        )
+    except urllib.error.HTTPError as err:
+        return jsonify({"error": f"Sportradar returned {err.code}"}), 502

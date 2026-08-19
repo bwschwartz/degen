@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Autocomplete,
   Box,
@@ -10,6 +10,7 @@ import {
   DialogContent,
   DialogTitle,
   Button,
+  Collapse,
   Fab,
   IconButton,
   Paper,
@@ -28,10 +29,31 @@ import {
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import DeleteOutlinedIcon from '@mui/icons-material/DeleteOutlined'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp'
+import GameLogPanel from './GameLogPanel'
 
+// App palette: #FFFBFE #7A7D7D #D0CFCF #565254 #FFFFFF, orange accent #E56020
 const theme = createTheme({
   palette: {
-    primary: { main: '#e56020' }, // WNBA orange
+    primary: { main: '#E56020', contrastText: '#FFFFFF' },
+    secondary: { main: '#565254', contrastText: '#FFFBFE' },
+    background: { default: '#FFFBFE', paper: '#FFFFFF' },
+    text: { primary: '#565254', secondary: '#7A7D7D' },
+    divider: '#D0CFCF',
+  },
+  components: {
+    MuiTableCell: {
+      styleOverrides: {
+        root: { borderColor: '#D0CFCF' },
+        head: { color: '#565254', fontWeight: 600 },
+      },
+    },
+    MuiPaper: {
+      styleOverrides: {
+        root: { border: '1px solid #D0CFCF' },
+      },
+    },
   },
 })
 
@@ -86,6 +108,7 @@ function App() {
   const [indexBuilding, setIndexBuilding] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [retryTick, setRetryTick] = useState(0)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
 
   const fetchStats = useCallback(async (id: string) => {
     try {
@@ -180,6 +203,11 @@ function App() {
 
   const removePlayer = (id: string) => {
     setRows((prev) => prev.filter((r) => r.id !== id))
+    setExpandedId((prev) => (prev === id ? null : prev))
+  }
+
+  const toggleExpanded = (id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id))
   }
 
   return (
@@ -209,6 +237,7 @@ function App() {
           <Table aria-label="player statistics">
             <TableHead>
               <TableRow>
+                <TableCell sx={{ width: 48 }} />
                 <TableCell>Player</TableCell>
                 <TableCell align="right">Points</TableCell>
                 <TableCell align="right">Rebounds</TableCell>
@@ -219,7 +248,7 @@ function App() {
             <TableBody>
               {rows.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={5} align="center" sx={{ py: 6 }}>
+                  <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
                     <Typography color="text.secondary">
                       No players yet — hit the + button to search for players.
                     </Typography>
@@ -227,7 +256,28 @@ function App() {
                 </TableRow>
               )}
               {rows.map((row) => (
-                <TableRow key={row.id} hover>
+                <Fragment key={row.id}>
+                <TableRow
+                  hover
+                  onClick={() => toggleExpanded(row.id)}
+                  sx={{ cursor: 'pointer', '& > *': { borderBottom: 'unset' } }}
+                >
+                  <TableCell sx={{ width: 48 }}>
+                    <IconButton
+                      size="small"
+                      aria-label={
+                        expandedId === row.id
+                          ? `collapse ${row.full_name}`
+                          : `expand ${row.full_name}`
+                      }
+                    >
+                      {expandedId === row.id ? (
+                        <KeyboardArrowUpIcon />
+                      ) : (
+                        <KeyboardArrowDownIcon />
+                      )}
+                    </IconButton>
+                  </TableCell>
                   <TableCell>
                     <Typography sx={{ fontWeight: 500 }}>{row.full_name}</Typography>
                     <Typography variant="body2" color="text.secondary">
@@ -262,13 +312,29 @@ function App() {
                       <IconButton
                         size="small"
                         aria-label={`remove ${row.full_name}`}
-                        onClick={() => removePlayer(row.id)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          removePlayer(row.id)
+                        }}
                       >
                         <DeleteOutlinedIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
                   </TableCell>
                 </TableRow>
+                <TableRow>
+                  <TableCell colSpan={6} sx={{ py: 0 }}>
+                    <Collapse
+                      in={expandedId === row.id}
+                      timeout="auto"
+                      mountOnEnter
+                      unmountOnExit
+                    >
+                      <GameLogPanel playerId={row.id} />
+                    </Collapse>
+                  </TableCell>
+                </TableRow>
+                </Fragment>
               ))}
             </TableBody>
           </Table>
